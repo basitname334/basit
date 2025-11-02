@@ -14,7 +14,7 @@ function computeScale(baseQuantity, requestedQuantity) {
 }
 
 router.post('/', (req, res) => {
-  const { dish_id, customer_id, requested_quantity, requested_unit, overrides } = req.body;
+  const { dish_id, customer_id, requested_quantity, requested_unit, overrides, booking_date, booking_time, delivery_date, delivery_time, delivery_address, number_of_persons } = req.body;
   if (!dish_id || !customer_id || !requested_quantity || !requested_unit) return res.status(400).json({ error: 'dish_id, customer_id, requested_quantity, requested_unit required' });
   const dish = db.prepare('SELECT * FROM dishes WHERE id = ?').get(dish_id);
   if (!dish) return res.status(404).json({ error: 'dish not found' });
@@ -26,8 +26,8 @@ router.post('/', (req, res) => {
   const mapByIngredient = new Map(mappings.map(m => [m.ingredient_id, m]));
   let orderId;
   transact(() => {
-    const info = db.prepare('INSERT INTO orders (user_id, customer_id, dish_id, requested_quantity, requested_unit, scale_factor) VALUES (?,?,?,?,?,?)')
-      .run(req.user.id, customer_id, dish_id, Number(requested_quantity), requested_unit, scale);
+    const info = db.prepare('INSERT INTO orders (user_id, customer_id, dish_id, requested_quantity, requested_unit, scale_factor, booking_date, booking_time, delivery_date, delivery_time, delivery_address, number_of_persons) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(req.user.id, customer_id, dish_id, Number(requested_quantity), requested_unit, scale, booking_date || null, booking_time || null, delivery_date || null, delivery_time || null, delivery_address || null, number_of_persons ? Number(number_of_persons) : null);
     orderId = info.lastInsertRowid;
     const ins = db.prepare('INSERT INTO order_ingredients (order_id, ingredient_id, scaled_amount, unit) VALUES (?,?,?,?)');
     if (Array.isArray(overrides) && overrides.length > 0) {
@@ -61,6 +61,88 @@ router.get('/', (req, res) => {
     ORDER BY o.created_at DESC
   `).all(req.user.id, req.user.role);
   res.json(rows);
+});
+
+router.get('/:id', (req, res) => {
+  const { id } = req.params;
+  const order = db.prepare(`
+    SELECT o.*, d.name as dish_name, c.name as customer_name, c.phone as customer_phone, c.email as customer_email
+    FROM orders o
+    JOIN dishes d ON d.id = o.dish_id
+    JOIN customers c ON c.id = o.customer_id
+    WHERE o.id = ?
+  `).get(id);
+  if (!order) return res.status(404).json({ error: 'not found' });
+  if (req.user.role !== 'admin' && order.user_id !== req.user.id) return res.status(403).json({ error: 'forbidden' });
+  res.json(order);
+});
+
+router.put('/:id', (req, res) => {
+  const { id } = req.params;
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
+  if (!order) return res.status(404).json({ error: 'order not found' });
+  if (req.user.role !== 'admin' && order.user_id !== req.user.id) return res.status(403).json({ error: 'forbidden' });
+  
+  const { customer_id, dish_id, requested_quantity, requested_unit, booking_date, booking_time, delivery_date, delivery_time, delivery_address, number_of_persons } = req.body;
+  
+  // Validate if dish_id or requested_quantity/unit changed
+  let scale = order.scale_factor;
+  let dish = db.prepare('SELECT * FROM dishes WHERE id = ?').get(dish_id || order.dish_id);
+  if (!dish) return res.status(404).json({ error: 'dish not found' });
+  
+  const finalDishId = dish_id || order.dish_id;
+  const finalCustomerId = customer_id ? Number(customer_id) : order.customer_id;
+  const finalQuantity = requested_quantity ? Number(requested_quantity) : order.requested_quantity;
+  const finalUnit = requested_unit || order.requested_unit;
+  
+  if (dish.base_unit !== finalUnit) return res.status(400).json({ error: `unit mismatch: dish base is ${dish.base_unit}` });
+  
+  if (requested_quantity || requested_unit || dish_id) {
+    scale = computeScale(dish.base_quantity, finalQuantity);
+  }
+  
+  // Update order
+  db.prepare(`
+    UPDATE orders 
+    SET customer_id = ?, dish_id = ?, requested_quantity = ?, requested_unit = ?, scale_factor = ?, 
+        booking_date = ?, booking_time = ?, delivery_date = ?, delivery_time = ?, 
+        delivery_address = ?, number_of_persons = ?
+    WHERE id = ?
+  `).run(
+    finalCustomerId, finalDishId, finalQuantity, finalUnit, scale,
+    booking_date !== undefined ? booking_date : order.booking_date,
+    booking_time !== undefined ? booking_time : order.booking_time,
+    delivery_date !== undefined ? delivery_date : order.delivery_date,
+    delivery_time !== undefined ? delivery_time : order.delivery_time,
+    delivery_address !== undefined ? delivery_address : order.delivery_address,
+    number_of_persons !== undefined ? (number_of_persons ? Number(number_of_persons) : null) : order.number_of_persons,
+    id
+  );
+  
+  // Recalculate ingredients if quantity/unit/dish changed
+  if (requested_quantity || requested_unit || dish_id) {
+    const mappings = db.prepare('SELECT * FROM dish_ingredients WHERE dish_id = ?').all(finalDishId);
+    db.prepare('DELETE FROM order_ingredients WHERE order_id = ?').run(id);
+    const ins = db.prepare('INSERT INTO order_ingredients (order_id, ingredient_id, scaled_amount, unit) VALUES (?,?,?,?)');
+    for (const m of mappings) {
+      const scaled = m.amount_per_base * scale;
+      ins.run(id, m.ingredient_id, scaled, m.unit);
+    }
+  }
+  
+  const updatedOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
+  res.json(updatedOrder);
+});
+
+router.delete('/:id', (req, res) => {
+  const { id } = req.params;
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
+  if (!order) return res.status(404).json({ error: 'order not found' });
+  if (req.user.role !== 'admin' && order.user_id !== req.user.id) return res.status(403).json({ error: 'forbidden' });
+  
+  // Delete order (order_ingredients will be deleted via CASCADE)
+  db.prepare('DELETE FROM orders WHERE id = ?').run(id);
+  res.status(204).send();
 });
 
 router.get('/:id/slips', (req, res) => {

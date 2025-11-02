@@ -6,11 +6,29 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Test if a path is actually persistent by writing and reading a test file
+function testPersistentPath(testPath) {
+  const testFile = path.join(testPath, '.persistence_test');
+  try {
+    // Write a test file
+    fs.writeFileSync(testFile, 'test');
+    // Read it back
+    const content = fs.readFileSync(testFile, 'utf8');
+    // Delete it
+    fs.unlinkSync(testFile);
+    return content === 'test';
+  } catch (err) {
+    return false;
+  }
+}
+
 // Use persistent storage location for deployments
 // Priority: 1. SQLITE_PATH env var, 2. Persistent disk (/tmp/data on Render), 3. Local dev path
 function getDbPath() {
   if (process.env.SQLITE_PATH) {
-    return process.env.SQLITE_PATH;
+    const dbPath = process.env.SQLITE_PATH;
+    console.log(`[Database] Using SQLITE_PATH: ${dbPath}`);
+    return dbPath;
   }
   
   // For production deployments (Render, Heroku, etc.), use a persistent location
@@ -25,14 +43,42 @@ function getDbPath() {
       if (!fs.existsSync(persistentPath)) {
         fs.mkdirSync(persistentPath, { recursive: true });
       }
-      return path.join(persistentPath, 'data.sqlite');
+      
+      // CRITICAL: Test that the persistent path is actually persistent
+      // This prevents silent fallback to non-persistent storage
+      const isPersistent = testPersistentPath(persistentPath);
+      
+      if (!isPersistent) {
+        console.error(`[Database] ERROR: Persistent path ${persistentPath} is not writable or not persistent!`);
+        console.error(`[Database] This will cause data loss on container restarts.`);
+        console.error(`[Database] Please verify the persistent disk is mounted in your Render dashboard.`);
+        // In production, we should fail loudly rather than silently use non-persistent storage
+        if (process.env.RENDER || process.env.NODE_ENV === 'production') {
+          console.error(`[Database] FAILING: Cannot use non-persistent storage in production.`);
+          console.error(`[Database] Set SQLITE_PATH environment variable to a persistent location.`);
+          throw new Error(`Persistent disk not available at ${persistentPath}. Data will be lost on restart.`);
+        }
+      } else {
+        console.log(`[Database] ✓ Persistent disk verified at: ${persistentPath}`);
+      }
+      
+      const dbPath = path.join(persistentPath, 'data.sqlite');
+      return dbPath;
     } catch (err) {
-      console.warn(`Warning: Could not create persistent path ${persistentPath}, using default`);
+      console.error(`[Database] ERROR: Could not use persistent path ${persistentPath}:`, err.message);
+      // Only allow fallback in development
+      if (process.env.NODE_ENV !== 'production' && !process.env.RENDER && !process.env.HEROKU) {
+        console.warn(`[Database] Falling back to local development path`);
+      } else {
+        throw err; // Fail loudly in production
+      }
     }
   }
   
-  // Default: local development path
-  return path.join(__dirname, '..', 'data.sqlite');
+  // Default: local development path (only for development)
+  const devPath = path.join(__dirname, '..', 'data.sqlite');
+  console.log(`[Database] Using local development path: ${devPath}`);
+  return devPath;
 }
 
 export const dbPath = getDbPath();
@@ -45,9 +91,22 @@ if (!fs.existsSync(dbDir)) {
 
 console.log(`[Database] Initializing SQLite database at: ${dbPath}`);
 console.log(`[Database] Directory exists: ${fs.existsSync(dbDir)}`);
+try {
+  if (fs.existsSync(dbDir)) {
+    fs.accessSync(dbDir, fs.constants.W_OK);
+    console.log(`[Database] Directory is writable: ✓`);
+  }
+} catch (err) {
+  console.warn(`[Database] Directory writability check failed: ${err.message}`);
+}
+console.log(`[Database] Environment: ${process.env.NODE_ENV || 'development'}`);
+console.log(`[Database] Render: ${process.env.RENDER || 'not detected'}`);
 if (fs.existsSync(dbPath)) {
   const stats = fs.statSync(dbPath);
   console.log(`[Database] Existing database file size: ${(stats.size / 1024).toFixed(2)} KB`);
+  console.log(`[Database] Database file last modified: ${stats.mtime.toISOString()}`);
+} else {
+  console.log(`[Database] No existing database file found - will create new database`);
 }
 
 export const db = new Database(dbPath);
@@ -191,6 +250,35 @@ CREATE TABLE IF NOT EXISTS order_ingredients (
     }
   } catch (err) {
     console.error('Error in customer_id migration:', err);
+  }
+  
+  // Migration: add booking/delivery fields and number_of_persons to orders table
+  try {
+    const ordersTableInfo = db.prepare("PRAGMA table_info(orders)").all();
+    const hasBookingDate = ordersTableInfo.find(col => col.name === 'booking_date');
+    const hasDeliveryAddress = ordersTableInfo.find(col => col.name === 'delivery_address');
+    const hasNumberOfPersons = ordersTableInfo.find(col => col.name === 'number_of_persons');
+    
+    if (!hasBookingDate) {
+      try { db.prepare("ALTER TABLE orders ADD COLUMN booking_date TEXT").run(); } catch (_) {}
+    }
+    if (!ordersTableInfo.find(col => col.name === 'booking_time')) {
+      try { db.prepare("ALTER TABLE orders ADD COLUMN booking_time TEXT").run(); } catch (_) {}
+    }
+    if (!ordersTableInfo.find(col => col.name === 'delivery_date')) {
+      try { db.prepare("ALTER TABLE orders ADD COLUMN delivery_date TEXT").run(); } catch (_) {}
+    }
+    if (!ordersTableInfo.find(col => col.name === 'delivery_time')) {
+      try { db.prepare("ALTER TABLE orders ADD COLUMN delivery_time TEXT").run(); } catch (_) {}
+    }
+    if (!hasDeliveryAddress) {
+      try { db.prepare("ALTER TABLE orders ADD COLUMN delivery_address TEXT").run(); } catch (_) {}
+    }
+    if (!hasNumberOfPersons) {
+      try { db.prepare("ALTER TABLE orders ADD COLUMN number_of_persons INTEGER").run(); } catch (_) {}
+    }
+  } catch (err) {
+    console.error('Error in orders migration:', err);
   }
   
   // Migration: convert category text to category_id foreign key

@@ -5,9 +5,51 @@ import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-// Resolve DB next to the backend folder by default, independent of process.cwd()
-const defaultDbPath = path.join(__dirname, '..', 'data.sqlite');
-export const dbPath = process.env.SQLITE_PATH || defaultDbPath;
+
+// Use persistent storage location for deployments
+// Priority: 1. SQLITE_PATH env var, 2. Persistent disk (/tmp/data on Render), 3. Local dev path
+function getDbPath() {
+  if (process.env.SQLITE_PATH) {
+    return process.env.SQLITE_PATH;
+  }
+  
+  // For production deployments (Render, Heroku, etc.), use a persistent location
+  // Render mounts persistent disks at /tmp
+  // Heroku ephemeral filesystem - need external storage or env var
+  const persistentPath = process.env.PERSISTENT_DISK_PATH || '/tmp/data';
+  
+  // Check if persistent path exists or if we're in a deployment environment
+  if (process.env.NODE_ENV === 'production' || process.env.RENDER || process.env.HEROKU) {
+    // Ensure directory exists
+    try {
+      if (!fs.existsSync(persistentPath)) {
+        fs.mkdirSync(persistentPath, { recursive: true });
+      }
+      return path.join(persistentPath, 'data.sqlite');
+    } catch (err) {
+      console.warn(`Warning: Could not create persistent path ${persistentPath}, using default`);
+    }
+  }
+  
+  // Default: local development path
+  return path.join(__dirname, '..', 'data.sqlite');
+}
+
+export const dbPath = getDbPath();
+
+// Ensure directory exists for the database file
+const dbDir = path.dirname(dbPath);
+if (!fs.existsSync(dbDir)) {
+  fs.mkdirSync(dbDir, { recursive: true });
+}
+
+console.log(`[Database] Initializing SQLite database at: ${dbPath}`);
+console.log(`[Database] Directory exists: ${fs.existsSync(dbDir)}`);
+if (fs.existsSync(dbPath)) {
+  const stats = fs.statSync(dbPath);
+  console.log(`[Database] Existing database file size: ${(stats.size / 1024).toFixed(2)} KB`);
+}
+
 export const db = new Database(dbPath);
 
 export function ensureSchema() {
@@ -105,37 +147,51 @@ CREATE TABLE IF NOT EXISTS order_ingredients (
       // Add customer_id column with a default customer if needed
       db.prepare("ALTER TABLE orders ADD COLUMN customer_id INTEGER").run();
       
-      // Create a default customer if no customers exist
+      // Get existing order count to determine if this is a fresh DB or migration
+      const orderCount = db.prepare("SELECT COUNT(*) as count FROM orders").get().count;
       const customerCount = db.prepare("SELECT COUNT(*) as count FROM customers").get().count;
-      if (customerCount === 0) {
+      
+      // Only create default customer if there are existing orders but no customers
+      // This prevents creating "Default Customer" on fresh database deployments
+      if (orderCount > 0 && customerCount === 0) {
         const defaultCustomer = db.prepare("INSERT INTO customers (name) VALUES (?)").run('Default Customer');
         const defaultCustomerId = defaultCustomer.lastInsertRowid;
         // Update all existing orders to use the default customer
         db.prepare("UPDATE orders SET customer_id = ? WHERE customer_id IS NULL").run(defaultCustomerId);
+      } else if (customerCount > 0) {
+        // If customers exist, assign orders to the first customer
+        const firstCustomer = db.prepare("SELECT id FROM customers LIMIT 1").get();
+        if (firstCustomer) {
+          db.prepare("UPDATE orders SET customer_id = ? WHERE customer_id IS NULL").run(firstCustomer.id);
+        }
       }
       
-      // Make customer_id NOT NULL by recreating table
-      db.exec(`
-        CREATE TABLE orders_new (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          user_id INTEGER NOT NULL,
-          customer_id INTEGER NOT NULL,
-          dish_id INTEGER NOT NULL,
-          requested_quantity REAL NOT NULL,
-          requested_unit TEXT NOT NULL,
-          scale_factor REAL NOT NULL,
-          created_at TEXT NOT NULL DEFAULT (datetime('now')),
-          FOREIGN KEY(user_id) REFERENCES users(id),
-          FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE RESTRICT,
-          FOREIGN KEY(dish_id) REFERENCES dishes(id)
-        );
-        INSERT INTO orders_new (id, user_id, customer_id, dish_id, requested_quantity, requested_unit, scale_factor, created_at)
-        SELECT id, user_id, COALESCE(customer_id, (SELECT id FROM customers LIMIT 1)), dish_id, requested_quantity, requested_unit, scale_factor, created_at FROM orders;
-        DROP TABLE orders;
-        ALTER TABLE orders_new RENAME TO orders;
-      `);
+      // Make customer_id NOT NULL by recreating table (only if orders exist)
+      if (orderCount > 0) {
+        db.exec(`
+          CREATE TABLE orders_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            customer_id INTEGER NOT NULL,
+            dish_id INTEGER NOT NULL,
+            requested_quantity REAL NOT NULL,
+            requested_unit TEXT NOT NULL,
+            scale_factor REAL NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY(user_id) REFERENCES users(id),
+            FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE RESTRICT,
+            FOREIGN KEY(dish_id) REFERENCES dishes(id)
+          );
+          INSERT INTO orders_new (id, user_id, customer_id, dish_id, requested_quantity, requested_unit, scale_factor, created_at)
+          SELECT id, user_id, COALESCE(customer_id, (SELECT id FROM customers LIMIT 1)), dish_id, requested_quantity, requested_unit, scale_factor, created_at FROM orders;
+          DROP TABLE orders;
+          ALTER TABLE orders_new RENAME TO orders;
+        `);
+      }
     }
-  } catch (_) {}
+  } catch (err) {
+    console.error('Error in customer_id migration:', err);
+  }
   
   // Migration: convert category text to category_id foreign key
   try {

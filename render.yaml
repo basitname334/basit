@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: basit-backend
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 4000
+    # IMPORTANT: Mount a persistent disk to store the database
+    # This prevents data loss on redeployments
+    disk:
+      name: data-disk
+      mountPath: /tmp/data
+      sizeGB: 1
+

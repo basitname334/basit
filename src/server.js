@@ -53,5 +53,9 @@ const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`API listening on http://localhost:${PORT}`);
   console.log(`Using SQLite at: ${dbPath}`);
+  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  if (process.env.SQLITE_PATH) {
+    console.log(`Database path from SQLITE_PATH env var: ${process.env.SQLITE_PATH}`);
+  }
 });
 

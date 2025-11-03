@@ -1,104 +1,66 @@
 import dotenv from 'dotenv';
 dotenv.config();
-import { connectDB, getDB, toObjectId } from './mongodb.js';
+import { db, ensureSchema } from './sqlite.js';
 import bcrypt from 'bcryptjs';
 
-async function upsertUser(email, password, role) {
-  const db = await getDB();
+ensureSchema();
+
+function upsertUser(email, password, role) {
   const normalizedEmail = String(email || '').trim().toLowerCase();
-  const exists = await db.collection('users').findOne({ email: normalizedEmail });
-  if (exists) return exists._id.toString();
+  const exists = db.prepare('SELECT id FROM users WHERE email = ?').get(normalizedEmail);
+  if (exists) return exists.id;
   const hash = bcrypt.hashSync(password, 10);
-  const result = await db.collection('users').insertOne({
-    email: normalizedEmail,
-    password_hash: hash,
-    role,
-    created_at: new Date().toISOString()
-  });
+  const info = db.prepare('INSERT INTO users (email, password_hash, role) VALUES (?,?,?)').run(normalizedEmail, hash, role);
   console.log(`Created user ${normalizedEmail} (${role})`);
-  return result.insertedId.toString();
+  return info.lastInsertRowid;
 }
 
-async function upsertCategory(name) {
-  const db = await getDB();
-  const exists = await db.collection('categories').findOne({ name });
-  if (exists) return exists._id.toString();
-  const result = await db.collection('categories').insertOne({
-    name,
-    created_at: new Date().toISOString()
-  });
+function upsertCategory(name) {
+  const exists = db.prepare('SELECT id FROM categories WHERE name = ?').get(name);
+  if (exists) return exists.id;
+  const info = db.prepare('INSERT INTO categories (name) VALUES (?)').run(name);
   console.log(`Created category ${name}`);
-  return result.insertedId.toString();
+  return info.lastInsertRowid;
 }
 
-async function upsertIngredient(name, categoryId) {
-  const db = await getDB();
-  const exists = await db.collection('ingredients').findOne({ name });
-  if (exists) return exists._id.toString();
-  const result = await db.collection('ingredients').insertOne({
-    name,
-    category_id: categoryId,
-    created_at: new Date().toISOString()
-  });
-  return result.insertedId.toString();
+function upsertIngredient(name, categoryId) {
+  const exists = db.prepare('SELECT id FROM ingredients WHERE name = ?').get(name);
+  if (exists) return exists.id;
+  const info = db.prepare('INSERT INTO ingredients (name, category_id) VALUES (?, ?)').run(name, categoryId);
+  return info.lastInsertRowid;
 }
 
-async function upsertDish(name, base_quantity, base_unit) {
-  const db = await getDB();
-  const exists = await db.collection('dishes').findOne({ name });
-  if (exists) return exists._id.toString();
-  const result = await db.collection('dishes').insertOne({
-    name,
-    base_quantity,
-    base_unit,
-    created_at: new Date().toISOString()
-  });
-  return result.insertedId.toString();
+function upsertDish(name, base_quantity, base_unit) {
+  const exists = db.prepare('SELECT id FROM dishes WHERE name = ?').get(name);
+  if (exists) return exists.id;
+  const info = db.prepare('INSERT INTO dishes (name, base_quantity, base_unit) VALUES (?,?,?)').run(name, base_quantity, base_unit);
+  return info.lastInsertRowid;
 }
 
-async function main() {
-  try {
-    await connectDB();
-    
-    await upsertUser('admin@example.com', 'admin123', 'admin');
-    await upsertUser('user@example.com', 'user123', 'user');
+function main() {
+  upsertUser('admin@example.com', 'admin123', 'admin');
+  upsertUser('user@example.com', 'user123', 'user');
 
-    // Create categories first
-    const grainsCategory = await upsertCategory('Grains');
-    const liquidsCategory = await upsertCategory('Liquids');
-    const seasoningsCategory = await upsertCategory('Seasonings');
+  // Create categories first
+  const grainsCategory = upsertCategory('Grains');
+  const liquidsCategory = upsertCategory('Liquids');
+  const seasoningsCategory = upsertCategory('Seasonings');
 
-    // Then create ingredients with category_id
-    const rice = await upsertIngredient('Rice', grainsCategory);
-    const water = await upsertIngredient('Water', liquidsCategory);
-    const salt = await upsertIngredient('Salt', seasoningsCategory);
+  // Then create ingredients with category_id
+  const rice = upsertIngredient('Rice', grainsCategory);
+  const water = upsertIngredient('Water', liquidsCategory);
+  const salt = upsertIngredient('Salt', seasoningsCategory);
 
-    const dishId = await upsertDish('Plain Boiled Rice', 1, 'kg');
-    const db = await getDB();
-    const dish = await db.collection('dishes').findOne({ _id: toObjectId(dishId) });
-    
-    if (!dish.ingredients || dish.ingredients.length === 0) {
-      await db.collection('dishes').updateOne(
-        { _id: toObjectId(dishId) },
-        {
-          $set: {
-            ingredients: [
-              { ingredient_id: rice, amount_per_base: 1, unit: 'kg' },
-              { ingredient_id: water, amount_per_base: 1.5, unit: 'litre' },
-              { ingredient_id: salt, amount_per_base: 10, unit: 'g' }
-            ]
-          }
-        }
-      );
-      console.log('Seeded dish ingredients for Plain Boiled Rice');
-    }
-
-    console.log('Seed complete');
-    process.exit(0);
-  } catch (error) {
-    console.error('Seed error:', error);
-    process.exit(1);
+  const dishId = upsertDish('Plain Boiled Rice', 1, 'kg');
+  const haveMap = db.prepare('SELECT 1 FROM dish_ingredients WHERE dish_id = ?').get(dishId);
+  if (!haveMap) {
+    db.prepare('INSERT INTO dish_ingredients (dish_id, ingredient_id, amount_per_base, unit) VALUES (?,?,?,?)').run(dishId, rice, 1, 'kg');
+    db.prepare('INSERT INTO dish_ingredients (dish_id, ingredient_id, amount_per_base, unit) VALUES (?,?,?,?)').run(dishId, water, 1.5, 'litre');
+    db.prepare('INSERT INTO dish_ingredients (dish_id, ingredient_id, amount_per_base, unit) VALUES (?,?,?,?)').run(dishId, salt, 10, 'g');
+    console.log('Seeded dish ingredients for Plain Boiled Rice');
   }
+
+  console.log('Seed complete');
 }
 
 main();

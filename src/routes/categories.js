@@ -13,12 +13,17 @@ router.get('/', (req, res) => {
 
 router.post('/', requireRole('admin'), (req, res) => {
   const { name } = req.body;
-  if (!name) return res.status(400).json({ error: 'name required' });
+  const trimmed = typeof name === 'string' ? name.trim() : '';
+  if (!trimmed) return res.status(400).json({ error: 'name required' });
   try {
-    const info = db.prepare('INSERT INTO categories (name) VALUES (?)').run(name.trim());
-    res.status(201).json({ id: info.lastInsertRowid, name: name.trim() });
+    const info = db.prepare('INSERT INTO categories (name) VALUES (?)').run(trimmed);
+    res.status(201).json({ id: info.lastInsertRowid, name: trimmed });
   } catch (e) {
-    res.status(400).json({ error: 'duplicate or invalid' });
+    const msg = (e && e.message) || '';
+    if (msg.includes('UNIQUE constraint failed') || msg.toLowerCase().includes('unique')) {
+      return res.status(409).json({ error: 'category already exists' });
+    }
+    res.status(400).json({ error: 'invalid request' });
   }
 });
 

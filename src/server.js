@@ -14,8 +14,19 @@ import reportsRouter from './routes/reports.js';
 dotenv.config();
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+
+// Trust proxy for correct protocol/host when behind reverse proxies
+if (process.env.TRUST_PROXY === '1') {
+  app.set('trust proxy', true);
+}
+
+// CORS: allow configured origin(s) or fallback to * for dev
+const corsOrigin = process.env.CORS_ORIGIN || '*';
+app.use(cors({ origin: corsOrigin === '*' ? true : corsOrigin, credentials: true }));
+
+// Body parsers with sensible limits
+app.use(express.json({ limit: process.env.BODY_LIMIT || '10mb' }));
+app.use(express.urlencoded({ extended: false, limit: process.env.BODY_LIMIT || '10mb' }));
 
 ensureSchema();
 
@@ -49,9 +60,34 @@ app.use('/api/customers', customersRouter);
 app.use('/api/orders', ordersRouter);
 app.use('/api/reports', reportsRouter);
 
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ error: 'not_found' });
+});
+
+// Global error handler
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'internal_error' });
+});
+
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`API listening on http://localhost:${PORT}`);
   console.log(`Using SQLite at: ${dbPath}`);
 });
+
+function shutdown(signal) {
+  console.log(`\n${signal} received. Shutting down...`);
+  server.close(() => {
+    try { db.close(); } catch (_) {}
+    process.exit(0);
+  });
+  // Fallback exit if close hangs
+  setTimeout(() => process.exit(0), 5000).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 

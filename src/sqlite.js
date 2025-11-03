@@ -2,15 +2,45 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import os from 'os';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-// Resolve DB next to the backend folder by default, independent of process.cwd()
-const defaultDbPath = path.join(__dirname, '..', 'data.sqlite');
-export const dbPath = process.env.SQLITE_PATH || defaultDbPath;
+// Resolve a durable default DB location outside synced folders (e.g., OneDrive)
+function resolveDefaultDbPath() {
+  const home = os.homedir();
+  let baseDir;
+  if (process.platform === 'win32') {
+    baseDir = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+  } else if (process.platform === 'darwin') {
+    baseDir = path.join(home, 'Library', 'Application Support');
+  } else {
+    baseDir = process.env.XDG_DATA_HOME || path.join(home, '.local', 'share');
+  }
+  const appDir = path.join(baseDir, 'POS-System');
+  try { fs.mkdirSync(appDir, { recursive: true }); } catch (_) {}
+  return path.join(appDir, 'data.sqlite');
+}
+
+// Backward compatibility: keep using repo-adjacent DB if it already exists
+const legacyRepoDbPath = path.join(__dirname, '..', 'data.sqlite');
+const chosenDefaultPath = fs.existsSync(legacyRepoDbPath) ? legacyRepoDbPath : resolveDefaultDbPath();
+
+export const dbPath = process.env.SQLITE_PATH || chosenDefaultPath;
+
+// Ensure directory exists for custom SQLITE_PATH or default
+try {
+  const dir = path.dirname(dbPath);
+  fs.mkdirSync(dir, { recursive: true });
+} catch (_) {}
 export const db = new Database(dbPath);
 
 export function ensureSchema() {
+  // Improve durability and reduce lock contention
+  try { db.pragma('journal_mode = WAL'); } catch (_) {}
+  try { db.pragma('busy_timeout = 5000'); } catch (_) {}
+  try { db.pragma('synchronous = NORMAL'); } catch (_) {}
+
   const schema = `
 PRAGMA foreign_keys = ON;
 

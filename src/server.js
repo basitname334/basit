@@ -2,9 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
-import fs from 'fs';
-import path from 'path';
-import { db, ensureSchema, dbPath } from './sqlite.js';
+import { connectDB, getDB } from './mongodb.js';
 import authRouter from './routes/auth.js';
 import categoriesRouter from './routes/categories.js';
 import ingredientsRouter from './routes/ingredients.js';
@@ -19,72 +17,55 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-ensureSchema();
+// Connect to MongoDB
+connectDB().catch(console.error);
 
-function ensureDefaultUsers() {
+async function ensureDefaultUsers() {
+  const db = await getDB();
   const defaults = [
     { email: 'admin@example.com', password: 'admin123', role: 'admin' },
     { email: 'user@example.com', password: 'user123', role: 'user' },
   ];
   for (const u of defaults) {
     const email = u.email;
-    const exists = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+    const exists = await db.collection('users').findOne({ email });
     if (!exists) {
       const hash = bcrypt.hashSync(u.password, 10);
-      db.prepare('INSERT INTO users (email, password_hash, role) VALUES (?,?,?)').run(email, hash, u.role);
+      await db.collection('users').insertOne({
+        email,
+        password_hash: hash,
+        role: u.role,
+        created_at: new Date().toISOString()
+      });
       console.log(`Created default user ${email} (${u.role})`);
     }
   }
 }
 
-ensureDefaultUsers();
+// Initialize default users after connection
+connectDB().then(() => {
+  ensureDefaultUsers().catch(console.error);
+});
 
 // Enhanced health check endpoint with database status
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
   const healthStatus = {
     ok: true,
     timestamp: new Date().toISOString(),
     database: {
-      path: dbPath,
-      exists: fs.existsSync(dbPath),
-      writable: false,
-      size: null,
-      lastModified: null
+      type: 'MongoDB',
+      connected: false
     },
     environment: {
       nodeEnv: process.env.NODE_ENV || 'development',
-      render: !!process.env.RENDER,
-      persistentDiskPath: process.env.PERSISTENT_DISK_PATH || '/tmp/data'
+      render: !!process.env.RENDER
     }
   };
 
-  // Check database file status
-  if (fs.existsSync(dbPath)) {
-    try {
-      const stats = fs.statSync(dbPath);
-      healthStatus.database.size = stats.size;
-      healthStatus.database.lastModified = stats.mtime.toISOString();
-      fs.accessSync(path.dirname(dbPath), fs.constants.W_OK);
-      healthStatus.database.writable = true;
-    } catch (err) {
-      healthStatus.database.error = err.message;
-    }
-  } else {
-    // Check if directory is writable
-    try {
-      const dbDir = path.dirname(dbPath);
-      if (fs.existsSync(dbDir)) {
-        fs.accessSync(dbDir, fs.constants.W_OK);
-        healthStatus.database.writable = true;
-      }
-    } catch (err) {
-      healthStatus.database.error = `Directory not writable: ${err.message}`;
-    }
-  }
-
   // Test database connection
   try {
-    db.prepare('SELECT 1').get();
+    const db = await getDB();
+    await db.admin().ping();
     healthStatus.database.connected = true;
   } catch (err) {
     healthStatus.database.connected = false;
@@ -115,12 +96,15 @@ app.use('/api/orders', ordersRouter);
 app.use('/api/reports', reportsRouter);
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`API listening on http://localhost:${PORT}`);
-  console.log(`Using SQLite at: ${dbPath}`);
+  console.log(`Using MongoDB`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-  if (process.env.SQLITE_PATH) {
-    console.log(`Database path from SQLITE_PATH env var: ${process.env.SQLITE_PATH}`);
+  try {
+    await connectDB();
+    console.log('MongoDB connected successfully');
+  } catch (err) {
+    console.error('Failed to connect to MongoDB:', err);
   }
 });
 

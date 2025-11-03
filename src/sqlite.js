@@ -198,6 +198,11 @@ CREATE TABLE IF NOT EXISTS order_ingredients (
   try { db.prepare("ALTER TABLE dishes ADD COLUMN price_per_base REAL").run(); } catch (_) {}
   try { db.prepare("ALTER TABLE dishes ADD COLUMN cost_per_base REAL").run(); } catch (_) {}
   
+  // Best-effort migration for adding Urdu name columns
+  try { db.prepare("ALTER TABLE dishes ADD COLUMN name_ur TEXT").run(); } catch (_) {}
+  try { db.prepare("ALTER TABLE ingredients ADD COLUMN name_ur TEXT").run(); } catch (_) {}
+  try { db.prepare("ALTER TABLE categories ADD COLUMN name_ur TEXT").run(); } catch (_) {}
+  
   // Migration: add customer_id to orders table
   try {
     const tableInfo = db.prepare("PRAGMA table_info(orders)").all();

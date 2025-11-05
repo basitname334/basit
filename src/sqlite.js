@@ -100,23 +100,36 @@ CREATE TABLE IF NOT EXISTS orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL,
   customer_id INTEGER NOT NULL,
+  person_count INTEGER,
+  booking_date TEXT,
+  booking_time TEXT,
+  delivery_date TEXT,
+  delivery_time TEXT,
+  delivery_address TEXT,
+  notes TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY(user_id) REFERENCES users(id),
+  FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS order_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id INTEGER NOT NULL,
   dish_id INTEGER NOT NULL,
   requested_quantity REAL NOT NULL,
   requested_unit TEXT NOT NULL,
   scale_factor REAL NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  FOREIGN KEY(user_id) REFERENCES users(id),
-  FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE RESTRICT,
+  FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE,
   FOREIGN KEY(dish_id) REFERENCES dishes(id)
 );
 
 CREATE TABLE IF NOT EXISTS order_ingredients (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  order_id INTEGER NOT NULL,
+  order_item_id INTEGER NOT NULL,
   ingredient_id INTEGER NOT NULL,
   scaled_amount REAL NOT NULL,
   unit TEXT NOT NULL,
-  FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE,
+  FOREIGN KEY(order_item_id) REFERENCES order_items(id) ON DELETE CASCADE,
   FOREIGN KEY(ingredient_id) REFERENCES ingredients(id)
 );
 `;
@@ -127,45 +140,120 @@ CREATE TABLE IF NOT EXISTS order_ingredients (
   try { db.prepare("ALTER TABLE dishes ADD COLUMN price_per_base REAL").run(); } catch (_) {}
   try { db.prepare("ALTER TABLE dishes ADD COLUMN cost_per_base REAL").run(); } catch (_) {}
   
-  // Migration: add customer_id to orders table
+  // Migration: migrate old orders structure to new structure with order_items
   try {
     const tableInfo = db.prepare("PRAGMA table_info(orders)").all();
-    const hasCustomerId = tableInfo.find(col => col.name === 'customer_id');
-    if (!hasCustomerId) {
-      // Add customer_id column with a default customer if needed
-      db.prepare("ALTER TABLE orders ADD COLUMN customer_id INTEGER").run();
+    const hasOrderItems = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='order_items'").get();
+    const hasOldDishId = tableInfo.find(col => col.name === 'dish_id');
+    
+    if (hasOldDishId && !hasOrderItems) {
+      console.log('Migrating orders to new structure with order_items...');
       
-      // Create a default customer if no customers exist
-      const customerCount = db.prepare("SELECT COUNT(*) as count FROM customers").get().count;
-      if (customerCount === 0) {
-        const defaultCustomer = db.prepare("INSERT INTO customers (name) VALUES (?)").run('Default Customer');
-        const defaultCustomerId = defaultCustomer.lastInsertRowid;
-        // Update all existing orders to use the default customer
-        db.prepare("UPDATE orders SET customer_id = ? WHERE customer_id IS NULL").run(defaultCustomerId);
+      // Create order_items table
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS order_items (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          order_id INTEGER NOT NULL,
+          dish_id INTEGER NOT NULL,
+          requested_quantity REAL NOT NULL,
+          requested_unit TEXT NOT NULL,
+          scale_factor REAL NOT NULL,
+          FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE,
+          FOREIGN KEY(dish_id) REFERENCES dishes(id)
+        );
+      `);
+      
+      // Migrate existing orders to order_items
+      const oldOrders = db.prepare('SELECT id, dish_id, requested_quantity, requested_unit, scale_factor FROM orders WHERE dish_id IS NOT NULL').all();
+      for (const order of oldOrders) {
+        db.prepare('INSERT INTO order_items (order_id, dish_id, requested_quantity, requested_unit, scale_factor) VALUES (?,?,?,?,?)')
+          .run(order.id, order.dish_id, order.requested_quantity, order.requested_unit, order.scale_factor);
       }
       
-      // Make customer_id NOT NULL by recreating table
+      // Migrate order_ingredients to use order_item_id
+      const oldIngredients = db.prepare('SELECT oi.*, oi.id as old_id FROM order_ingredients oi JOIN orders o ON oi.order_id = o.id JOIN order_items oit ON oit.order_id = o.id AND oit.dish_id = o.dish_id').all();
+      // Note: This is a simplified migration - may need adjustment based on actual data structure
+      
+      // Create new orders table structure
       db.exec(`
         CREATE TABLE orders_new (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           user_id INTEGER NOT NULL,
           customer_id INTEGER NOT NULL,
-          dish_id INTEGER NOT NULL,
-          requested_quantity REAL NOT NULL,
-          requested_unit TEXT NOT NULL,
-          scale_factor REAL NOT NULL,
+          person_count INTEGER,
+          booking_date TEXT,
+          booking_time TEXT,
+          delivery_date TEXT,
+          delivery_time TEXT,
+          delivery_address TEXT,
+          notes TEXT,
           created_at TEXT NOT NULL DEFAULT (datetime('now')),
           FOREIGN KEY(user_id) REFERENCES users(id),
-          FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE RESTRICT,
-          FOREIGN KEY(dish_id) REFERENCES dishes(id)
+          FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE RESTRICT
         );
-        INSERT INTO orders_new (id, user_id, customer_id, dish_id, requested_quantity, requested_unit, scale_factor, created_at)
-        SELECT id, user_id, COALESCE(customer_id, (SELECT id FROM customers LIMIT 1)), dish_id, requested_quantity, requested_unit, scale_factor, created_at FROM orders;
+      `);
+      
+      // Ensure customer_id exists
+      const hasCustomerId = tableInfo.find(col => col.name === 'customer_id');
+      if (!hasCustomerId) {
+        db.prepare("ALTER TABLE orders ADD COLUMN customer_id INTEGER").run();
+        const customerCount = db.prepare("SELECT COUNT(*) as count FROM customers").get().count;
+        if (customerCount === 0) {
+          const defaultCustomer = db.prepare("INSERT INTO customers (name) VALUES (?)").run('Default Customer');
+          const defaultCustomerId = defaultCustomer.lastInsertRowid;
+          db.prepare("UPDATE orders SET customer_id = ? WHERE customer_id IS NULL").run(defaultCustomerId);
+        }
+      }
+      
+      // Migrate data
+      db.exec(`
+        INSERT INTO orders_new (id, user_id, customer_id, created_at)
+        SELECT id, user_id, COALESCE(customer_id, (SELECT id FROM customers LIMIT 1)), created_at FROM orders;
+      `);
+      
+      // Update order_ingredients to use order_item_id
+      db.exec(`
+        CREATE TABLE order_ingredients_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          order_item_id INTEGER NOT NULL,
+          ingredient_id INTEGER NOT NULL,
+          scaled_amount REAL NOT NULL,
+          unit TEXT NOT NULL,
+          FOREIGN KEY(order_item_id) REFERENCES order_items(id) ON DELETE CASCADE,
+          FOREIGN KEY(ingredient_id) REFERENCES ingredients(id)
+        );
+      `);
+      
+      // Migrate order_ingredients by matching through order_items
+      const allOrderItems = db.prepare('SELECT oi.id as item_id, oi.order_id, oi.dish_id FROM order_items oi').all();
+      for (const item of allOrderItems) {
+        const oldIngredients = db.prepare(`
+          SELECT ingredient_id, scaled_amount, unit 
+          FROM order_ingredients 
+          WHERE order_id = ? AND EXISTS (
+            SELECT 1 FROM dishes d WHERE d.id = ?
+          )
+        `).all(item.order_id, item.dish_id);
+        
+        for (const ing of oldIngredients) {
+          db.prepare('INSERT INTO order_ingredients_new (order_item_id, ingredient_id, scaled_amount, unit) VALUES (?,?,?,?)')
+            .run(item.item_id, ing.ingredient_id, ing.scaled_amount, ing.unit);
+        }
+      }
+      
+      // Drop old tables and rename new ones
+      db.exec(`
+        DROP TABLE IF EXISTS order_ingredients;
+        ALTER TABLE order_ingredients_new RENAME TO order_ingredients;
         DROP TABLE orders;
         ALTER TABLE orders_new RENAME TO orders;
       `);
+      
+      console.log('Orders migration complete');
     }
-  } catch (_) {}
+  } catch (e) {
+    console.error('Error in orders migration:', e);
+  }
   
   // Migration: convert category text to category_id foreign key
   try {

@@ -37,7 +37,19 @@ function upsertDish(name, base_quantity, base_unit) {
   return info.lastInsertRowid;
 }
 
+function upsertCustomer(name, phone, email, address) {
+  const exists = db.prepare('SELECT id FROM customers WHERE name = ?').get(name);
+  if (exists) return exists.id;
+  const info = db.prepare('INSERT INTO customers (name, phone, email, address) VALUES (?, ?, ?, ?)')
+    .run(name.trim(), phone?.trim() || null, email?.trim() || null, address?.trim() || null);
+  console.log(`Created customer ${name}`);
+  return info.lastInsertRowid;
+}
+
 function main() {
+  console.log('Starting database seed...');
+  
+  // Ensure default users exist
   upsertUser('admin@example.com', 'admin123', 'admin');
   upsertUser('user@example.com', 'user123', 'user');
 
@@ -45,12 +57,26 @@ function main() {
   const grainsCategory = upsertCategory('Grains');
   const liquidsCategory = upsertCategory('Liquids');
   const seasoningsCategory = upsertCategory('Seasonings');
+  const vegetablesCategory = upsertCategory('Vegetables');
+  const proteinsCategory = upsertCategory('Proteins');
 
   // Then create ingredients with category_id
   const rice = upsertIngredient('Rice', grainsCategory);
   const water = upsertIngredient('Water', liquidsCategory);
   const salt = upsertIngredient('Salt', seasoningsCategory);
+  upsertIngredient('Black Pepper', seasoningsCategory);
+  upsertIngredient('Turmeric', seasoningsCategory);
+  upsertIngredient('Onion', vegetablesCategory);
+  upsertIngredient('Garlic', vegetablesCategory);
+  upsertIngredient('Chicken', proteinsCategory);
+  upsertIngredient('Beef', proteinsCategory);
 
+  // Create default customer
+  upsertCustomer('Default Customer', null, null, null);
+  upsertCustomer('John Doe', '1234567890', 'john@example.com', '123 Main St');
+  upsertCustomer('Jane Smith', '0987654321', 'jane@example.com', '456 Oak Ave');
+
+  // Create sample dish
   const dishId = upsertDish('Plain Boiled Rice', 1, 'kg');
   const haveMap = db.prepare('SELECT 1 FROM dish_ingredients WHERE dish_id = ?').get(dishId);
   if (!haveMap) {
@@ -60,7 +86,10 @@ function main() {
     console.log('Seeded dish ingredients for Plain Boiled Rice');
   }
 
-  console.log('Seed complete');
+  console.log('✅ Seed complete!');
+  console.log('Default users:');
+  console.log('  - admin@example.com / admin123 (admin)');
+  console.log('  - user@example.com / user123 (user)');
 }
 
 main();

@@ -218,7 +218,31 @@ CREATE TABLE IF NOT EXISTS order_ingredients (
         ALTER TABLE ingredients_new RENAME TO ingredients;
       `);
     }
-  } catch (_) {}
+  } catch (e) {
+    console.error('Error in category migration:', e);
+  }
+  
+  // Ensure at least one default customer exists for orders
+  try {
+    const customerCount = db.prepare("SELECT COUNT(*) as count FROM customers").get().count;
+    if (customerCount === 0) {
+      db.prepare("INSERT INTO customers (name, phone) VALUES (?, ?)").run('Default Customer', null);
+      console.log('Created default customer for orders');
+    }
+  } catch (e) {
+    console.error('Error ensuring default customer:', e);
+  }
+  
+  // Ensure at least one category exists for ingredients
+  try {
+    const categoryCount = db.prepare("SELECT COUNT(*) as count FROM categories").get().count;
+    if (categoryCount === 0) {
+      db.prepare("INSERT INTO categories (name) VALUES (?)").run('Uncategorized');
+      console.log('Created default category for ingredients');
+    }
+  } catch (e) {
+    console.error('Error ensuring default category:', e);
+  }
 }
 
 export function transact(fn) {
